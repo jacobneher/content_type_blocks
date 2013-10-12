@@ -1,0 +1,243 @@
+<?php
+
+/**
+ * Implements hook_form_alter().
+ */
+function content_type_blocks_form_alter(&$form, &$form_state, $form_id) {
+  if ($form_id == 'node_type_form' && isset($form['#node_type']->type)) {
+    $fieldset = 'blocks';
+    // Make module work with Content Type: Extras module (if installed) ... to prevent too many vertical tabs
+    if (module_exists('content_type_extras')) {
+      $fieldset = 'extras';
+    }
+
+    $form[$fieldset]['content_type_blocks_expose'] = array(
+      '#type'          => 'checkbox',
+      '#title'         => t('Enable data entry from a block.'),
+      '#default_value' => variable_get('content_type_blocks_expose_' . $form['#node_type']->type),
+      '#description'   => t('Enable this option to make the entry form for this content type available as a block.'),
+    );
+  }
+
+  // Make sure that we are not configuring the block (arg(2) !== 'block') AND that we are on a content type form
+  if (arg(2) !== 'block' && strpos($form_id, '_node_form')) {
+    $vertical_tabs = unserialize(variable_get('content_type_blocks_' . $form['type']['#value'] . '_vertical_tabs'));
+
+    foreach ($vertical_tabs as $machine_name => $value) {
+      if ($value === 0) {
+        unset($form[$machine_name]);
+      }
+    }
+
+    $additional_settings = unserialize(variable_get('content_type_blocks_' . $form['type']['#value'] . '_additional_settings'));
+
+    foreach ($additional_settings as $key => $value) {
+      if ($key == 'text_format' && !$value) {
+        foreach ($form as $machine => $element) {
+          if (is_array($element) && isset($element['und'][0]['#type']) && $element['und'][0]['#type'] == 'text_format') {
+            $form[$machine]['und']['#after_build'][] = 'content_type_blocks_hide_text_format';
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_block_info().
+ */
+function content_type_blocks_block_info() {
+  $blocks = array();
+
+  foreach (node_type_get_names() as $type => $name) {
+    if (variable_get('content_type_blocks_expose_' . $type)) {
+      $blocks[$type] = array(
+        'info'  => t('Content Type: Blocks (@name)', array('@name' => $name)),
+        'cache' => DRUPAL_NO_CACHE,
+      );
+    }
+  }
+
+  return $blocks;
+}
+
+/**
+ * Implements hook_block_view().
+ */
+function content_type_blocks_block_view($delta = '') {
+  $block = array();
+
+  $block['content']['#attached']['css'][] = drupal_get_path('module', 'content_type_blocks') . 'css/content_type_blocks.css';
+
+  return content_type_blocks_get_block($delta);
+}
+
+/**
+ * Implements hook_block_configure().
+ */
+function content_type_blocks_block_configure($delta = '') {
+  $fields = array();
+  $content_type_fields = field_info_instances('node', $delta);
+
+  // Gather all of the fields for the given content type
+  foreach ($content_type_fields as $key => $info) {
+    $fields[$key] = $info['label'];
+
+    // Help with UI and provide a little info as to why the field is disabled
+    if ($info['required']) {
+      $fields[$key] .= ' (required)';
+    }
+  }
+
+  // Build default value
+  $defaults = unserialize(variable_get('content_type_blocks_' . $delta . '_fields', NULL));
+  if (!$defaults) {
+    $defaults = content_type_blocks_default_options($fields);
+  }
+
+  // Build form to configure block
+  $form = array();
+  $form['content_type_blocks_settings'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('Content Type: Blocks Settings'),
+
+    'content_type_blocks_fields' => array(
+      '#type'          => 'checkboxes',
+      '#title'         => t('Fields'),
+      '#default_value' => $defaults,
+      '#options'       => $fields,
+      '#description'   => t('Check the boxes that you want to show in the block and uncheck the ones that you do not want to show. <strong>Required fields are disabled.</strong>'),
+    ),
+  );
+
+  foreach ($content_type_fields as $key => $info) {
+    if ($info['required']) {
+      // Set disabled for the fields that have been set as 'required' in the content type settings
+      $form['content_type_blocks_settings']['content_type_blocks_fields'][$key]['#disabled'] = TRUE;
+      // Force the checkbox to be checked for 'required' fields, just to make sure that they don't somehow get unchecked
+      $form['content_type_blocks_settings']['content_type_blocks_fields'][$key]['#default_value'] = $key;
+    }
+  }
+
+  // --- VERTICAL TABS
+  // Get form data so we can find all vertical tabs
+  $form_data = content_type_blocks_form_data($delta);
+  $vertical_tab_groups = array('additional_settings');
+  $vertical_tabs = array();
+
+  foreach($vertical_tab_groups as $key => $group) {
+    $tabs = $form_data[$group]['group']['#groups'][$group];
+    foreach ($tabs as $key => $tab) {
+      if (is_array($tab)) {
+        $vertical_tabs[$tab['#parents'][0]] = $tab['#title'];
+      }
+    }
+  }
+
+  $tabs_defaults = unserialize(variable_get('content_type_blocks_' . $delta . '_vertical_tabs', NULL));
+  if (!$tabs_defaults) {
+    $tabs_defaults = content_type_blocks_default_options($vertical_tabs);
+  }
+  $form['content_type_blocks_settings']['content_type_blocks_vertical_tabs'] = array(
+    '#type'          => 'checkboxes',
+    '#title'         => t('Vertical Tabs'),
+    '#default_value' => $tabs_defaults,
+    '#options'       => $vertical_tabs,
+    '#description'   => t('Check the boxes that you want to show in the block and uncheck the ones that you do not want to show.'),
+  );
+
+  // --- ADDITIONAL SETTINGS
+  $additional_settings_options = array(
+    'text_format' => 'Text Format',
+  );
+
+  $additional_settings_defaults = unserialize(variable_get('content_type_blocks_' . $delta . '_additional_settings', NULL));
+  if (!$additional_settings_defaults) {
+    $additional_settings_defaults = content_type_blocks_default_options($additional_settings_options);
+  }
+
+  // @TODO: Need to put in option to hide text format on fields like body
+  $form['content_type_blocks_settings']['content_type_blocks_additional_settings'] = array(
+    '#type'          => 'checkboxes',
+    '#title'         => t('Additional Settings'),
+    '#default_value' => $additional_settings_defaults,
+    '#options'       => $additional_settings_options,
+    '#description'   => t('Check the boxes that you want to show in the block and uncheck the ones that you do not want to show.'),
+  );
+
+  return $form;
+}
+
+/**
+ * Implements hook_block_save().
+ */
+function content_type_blocks_block_save($delta = '', $edit = array()) {
+  variable_set('content_type_blocks_' . $delta . '_fields', serialize($edit['content_type_blocks_fields']));
+  variable_set('content_type_blocks_' . $delta . '_vertical_tabs', serialize($edit['content_type_blocks_vertical_tabs']));
+  variable_set('content_type_blocks_' . $delta . '_additional_settings', serialize($edit['content_type_blocks_additional_settings']));
+}
+
+
+/**
+ * Generate a block containing a node entry form.
+ */
+function content_type_blocks_get_block($type) {
+  if (node_access('create', $type) && variable_get('content_type_blocks_expose_' . $type)) {
+    $block = array();
+
+    // Note title before rendering of form.
+    $title = drupal_get_title();
+
+    $form = content_type_blocks_form_data($type);
+
+    // Remove any field that is not supposed to be displayed
+    $field_settings = unserialize(variable_get('content_type_blocks_' . $type . '_fields', NULL));
+
+    foreach ($field_settings as $key => $value) {
+      if (!$value) {
+        unset($form[$key]);
+      }
+    }
+
+    // Restore title, which will have been overridden.
+    drupal_set_title($title, PASS_THROUGH);
+
+    $node_type = node_type_load($type);
+
+    $block['subject'] = t('@type form', array('@type' => $node_type->name));
+    $block['content']['form'] = $form;
+
+    return $block;
+  }
+}
+
+/**
+ * Retrieve given content type form data.
+ */
+function content_type_blocks_form_data($type) {
+  // Include page handler for node_add().
+  module_load_include('inc', 'node', 'node.pages');
+
+  $form = node_add($type);
+
+  return $form;
+}
+
+/**
+ * Get the default option selections for a given set of checkboxes.
+ */
+function content_type_blocks_default_options($group) {
+  $settings = array();
+  foreach ($group as $key => $value) {
+    $settings[$key] = $key;
+  }
+  return $settings;
+}
+
+/**
+ * Hide the text format for the fields if the option is set
+ */
+function content_type_blocks_hide_text_format(&$form) {
+  $form[0]['format']['#access'] = FALSE;
+  return $form;
+}

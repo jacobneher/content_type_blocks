@@ -1,0 +1,3 @@
+name = "Content Type: Blocks"
+description = "Add node forms to blocks."
+core = 7.x

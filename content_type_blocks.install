@@ -1,0 +1,8 @@
+<?php
+
+/**
+ * Implements hook_install().
+ */
+function content_type_blocks_install() {
+  db_query("UPDATE {system} SET weight = 20 WHERE name = 'content_type_blocks");
+}
